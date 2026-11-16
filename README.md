@@ -1,6 +1,6 @@
 # A Big-Data Pipeline for Bank Failure Early Warning
 
-**BFT65B — Big Data Analytics in Finance | Parts 1–3: Acquisition, Storage, Data Quality and Scalable Processing**  
+**BFT65B — Big Data Analytics in Finance | Parts 1–4: Acquisition, Storage, Data Quality, Scalable Processing and Feature Engineering**  
 **Repository:** https://github.com/NguyenDuong58/11230945-NguyenBaDuong  
 **Runtime:** Google Colab (Python); persistent artifacts: Google Drive; source and tests: GitHub.
 
@@ -21,17 +21,20 @@ The storage study compares losslessly equivalent uncompressed CSV and Snappy Par
 ├── README.md
 ├── requirements.txt
 ├── requirements_part3.txt
+├── requirements_part4.txt
 ├── notebooks/
 │   ├── 01_acquisition_colab.ipynb
 │   ├── 02_storage_colab.ipynb
 │   ├── 03_data_quality_panel_colab.ipynb
-│   └── 04_scalable_processing_colab.ipynb
+│   ├── 04_scalable_processing_colab.ipynb
+│   └── 05_feature_pipeline_colab.ipynb
 ├── run_acquisition.py
 ├── run_storage_benchmark.py
 ├── run_storage_analysis.py
 ├── run_layout_benchmark.py
 ├── run_data_quality.py
 ├── run_scalable_processing.py
+├── run_feature_pipeline.py
 ├── src/fdic_pipeline/
 │   ├── __init__.py
 │   ├── acquisition.py
@@ -44,7 +47,9 @@ The storage study compares losslessly equivalent uncompressed CSV and Snappy Par
 │   ├── data_quality.py
 │   ├── panel.py
 │   ├── processing_engines.py
-│   └── scalable_processing.py
+│   ├── scalable_processing.py
+│   ├── feature_policy.py
+│   └── feature_pipeline.py
 └── tests/
     ├── conftest.py
     ├── test_acquisition.py
@@ -60,7 +65,9 @@ The storage study compares losslessly equivalent uncompressed CSV and Snappy Par
     ├── test_panel_integration.py
     ├── test_processing_engines.py
     ├── test_processing_evidence.py
-    └── test_processing_integration.py
+    ├── test_processing_integration.py
+    ├── test_feature_policy.py
+    └── test_feature_pipeline_integration.py
 ```
 
 Only source code, notebooks, tests and documentation are committed. **Do not commit** FDIC datasets, Parquet/CSV files, run manifests, experiment results, model files, logs or access tokens. Notebook outputs should be saved back to GitHub **after a successful run**; they should contain compact validation summaries, tables and charts rather than raw data or local authentication information.
@@ -373,7 +380,7 @@ BFT65B_11230945/
     └── run_logs/part3_scalable_processing.log
 ```
 
-Part 4 will obtain the bank-quarter dataset through `resolve_stage(root, "quality_panel")`, not from the aggregated Part 3 benchmark results. The Part 3 stage is available separately for performance evidence, and its quality-panel parent SHA-256 must match the selected experiment. The source data and retrospective event audits remain separate from modelling features.
+Part 4 obtains the bank-quarter dataset through `resolve_stage(root, "quality_panel")`, not from the aggregated Part 3 benchmark results. The Part 3 stage is available separately for performance evidence, and its quality-panel parent SHA-256 must match the selected experiment. The source data and retrospective event audits remain separate from modelling features.
 
 **Operational interpretation.** A multi-node Spark cluster is not justified merely because Spark is part of the course. Before proposing a cluster, inspect actual query plans, memory pressure and runtimes on realistic workloads. Distribution becomes relevant when the working set cannot be processed reliably within a single host's memory/disk limits, when multi-source joins/shuffles overwhelm the local executor, or when operational throughput and latency requirements are repeatedly missed. The current `local[2]` results cannot establish any empirical cluster speedup. The conclusions should also consider coordination, I/O and operational cost.
 
@@ -407,3 +414,100 @@ python run_scalable_processing.py verify \
 8. OpenAI ChatGPT (GPT-6), code drafting and review support, 16 November 2026. The analysis must be verified by executable tests and independently measured FDIC results; generated suggestions are not treated as evidence.
 
 No downloaded bank records, experimental measurements, model parameters or future-outcome labels are supplied in the GitHub source repository. Part 2 audit outcomes are stored separately from prediction features. Part 3 benchmark results and execution-plan evidence are stored on Google Drive and referred to by SHA-256; only notebook summaries are committed. This research report must cite the applicable source APIs, engine documentation and AI assistance disclosed here.
+
+
+## Part 4 — Feature Pipeline (15 points)
+
+### Purpose and source contract
+
+The feature stage transforms the 48-field, 170-quarter bank-quarter panel into an auditable table of 21 current-/past-report financial features, an explicitly time-bounded four-quarter outcome, and physically separated development and holdout samples. It consumes the published `quality_panel` stage, verifies all input partition SHA-256 fingerprints, requires the published `processing` stage, and records that stage's verification digest as an additional dependency. No aggregate benchmark outputs are used as predictors.
+
+The experiment's `features` stage is registered with `quality_panel` as its direct parent. Its manifest records the exact Part 4 Git commit, the policy lock, the Part 2 and Part 3 validation hashes, the failure-source and terminal-audit hashes, the output partition hashes, the fitted preprocessing artifact checksum, and the sample counts. Published outputs are never overwritten; interrupted unpublished outputs can be rebuilt with `--replace-incomplete`.
+
+### Event definition and observation policy
+
+The FDIC Failures/Assistance source contains more than one transaction type. The target event is a linked, dated FDIC record with **`RESTYPE = FAILURE`**, not every row of the reference table. `ASSISTANCE` transactions are not labelled as failures and are conservatively treated as competing interventions when they occur in the prediction horizon. Unknown resolution types, unparseable dates, multiple conflicting failures, and inconsistent event timing are censored. The retrospective terminal reference is audited independently; an institution's cessation of reporting is not a failure.
+
+The fixed study target is **`Y_FAIL_4Q = 1{FAILURE event in (REPDTE, REPDTE + 4 calendar quarters]}`**, conditional on the financial report's assumed availability before the event. The horizon remains anchored at `REPDTE`, not at the assumed publication date. The availability date is `REPDTE + 90 calendar days`, an explicitly **unverified historical disclosure assumption**. A failure/competing event occurring on or before that date makes the report ineligible. An observed non-failure exit or assistance within the horizon is censored rather than labelled healthy; a bank with insufficient forward follow-up is also censored. Reports after 2025Q2 do not have complete four-quarter outcomes as of 2026Q2.
+
+The main chronological periods are fixed before model development:
+
+| Role | Report-date interval | Use |
+|---|---|---|
+| Development | 1984Q1–2006Q4 | Fit preprocessing and select models using chronological development folds |
+| Purge | 2007Q1–2007Q4 | Prevent overlap of four-quarter development horizons with test reporting dates |
+| Test holdout | 2008Q1–2014Q4 | Reserved for one post-lock model evaluation in Part 5 |
+| Later reports through 2025Q2 | 2015Q1–2025Q2 | Historical feature coverage only, not model selection or holdout evaluation |
+| Label-immature reports | 2025Q3–2026Q2 | Features retained; four-quarter label unavailable |
+
+The date-based FDIC source audit from Notebook 03 found **507 `FAILURE`** and **13 `ASSISTANCE`** rows dated 2008–2014. Part 4 independently recalculates the distinct qualifying failure CERTs linked to the Financials panel and requires at least 50; **these event counts must never be interchanged with positive bank-quarter labels**. Each source experiment generates its own measured sample counts; no row or label total is preset to a historical run's result.
+
+### Features, information set, and missing-data processing
+
+The 21 features are defined and ordered in `src/fdic_pipeline/feature_policy.py` and exported in `audits/feature_dictionary.csv`. Groups cover size, accounting and regulatory capital, funding, liquidity, credit exposure, earnings, quarter-on-quarter and year-on-year growth, reporting history, and data-quality diagnostics. Amount-based features use USD-thousands inputs; derived ratios and source profitability/capital ratios are interpreted as percentages. Growth calculations require exact calendar lags of one quarter or four quarters; reports separated by missing intermediate quarters are **never** treated as one-quarter growth.
+
+No `CERT`, `REPDTE`, `FAILDATE`, `RESTYPE`, `COST`, `ACTIVE`, `ENDEFYMD`, retrospective terminal class, or outcome label appears in `FEATURE_NAMES`. Source missingness is preserved; denominators must be positive, and neither imputation nor winsorization is applied when constructing the feature table.
+
+The model-data files retain `CERT`, `REPDTE` and `ASSUMED_AVAILABLE_FROM` as non-predictive metadata for independent bank-level warning-lead-time evaluation. **Only `FEATURE_NAMES` are predictors.** The withheld test metadata must not be inspected for development decisions.
+
+The scikit-learn preprocessing template is an explicit `Pipeline(SimpleImputer(strategy='median', add_indicator=True, keep_empty_features=True), RobustScaler(quantile_range=(25,75)))`. A fitted artifact is created **only from eligible development feature columns**; the holdout file is not opened when fitting it. Part 5 must clone the **unfitted** pipeline and refit the imputer and scaler separately within each expanding chronological training fold. The saved full-development fit is not used in fold validation.
+
+Availability-lag sensitivities of 30, 90 and 180 days are calculated using **development reports only** and reported separately from the fixed 90-day primary policy. They do not validate actual historical publication timestamps.
+
+### Notebooks, dependencies, and tests
+
+- `05_feature_pipeline_colab.ipynb` is the only Part 4 notebook. Its 11 code sections resolve the experiment, install dependencies, execute all tests, verify upstream data, lock the feature/label policy, review FDIC event counts, build data, inspect development-only diagnostics, display figures, independently verify every output row, and establish the Part 5 handoff.
+- `requirements_part4.txt` includes the pinned processing dependencies from Part 3 and pins NumPy, scikit-learn and joblib. Python packages already satisfying pinned versions are not forcibly reinstalled.
+- The GitHub Actions workflow sets up Java 17 and Python 3.11, installs `requirements_part4.txt`, and runs all repository unit and integration tests. All failures, errors, and skipped tests must be zero before constructing full FDIC features.
+- Synthetic tests check calendar-boundary labels, exact-lag features, assistance exclusion, missing data, source/outcome separation, source/manifest integrity, Parquet split equivalence, and development-only preprocessing. Synthetic test results do not constitute a full-data FDIC execution.
+
+**Notebook:** https://colab.research.google.com/github/NguyenDuong58/11230945-NguyenBaDuong/blob/main/notebooks/05_feature_pipeline_colab.ipynb
+
+### Reproduction sequence in Google Colab
+
+1. Upload the Part 4 source files to their existing repository paths, replacing `README.md` and `.github/workflows/tests.yml` and keeping all previous notebook and source files unchanged. Commit the files to `main` before opening the notebook. Do not upload source or derived FDIC data.
+2. Run Notebook 05 on a Colab CPU runtime. Section 1 mounts `/content/drive`, reads `control/active_experiment.json`, clones the repository, restores the recorded Part 4 commit if a feature stage is published, and installs `requirements_part4.txt`.
+3. Section 2 runs the complete repository test suite. Do not proceed when failures, errors or skips are nonzero. Section 3 checks SHA-256 and lineage of acquisition, storage, quality-panel and processing stages.
+4. Sections 4–5 lock the feature and event policy and print the observed `RESTYPE` distribution. The exact number of distinct dated failures within the test calendar is verified independently of positive labels.
+5. Section 6 streams all 170 quarters into the complete `feature_table/` and creates separate `model_data/development.parquet` and `model_data/test_holdout.parquet`. The full-development preprocessing artifact is fitted using the development file alone.
+6. Sections 7–9 display sample accounting, label/censoring reasons, development missingness, availability sensitivity and charts. Section 10 performs full independent read-only source-to-feature-and-label verification. Section 11 confirms `Part 4: PASSED` and `Handoff state: PASSED` and prints the paths needed by Part 5.
+7. Save the executed `.ipynb` file, including compact tables and figures, back to GitHub. Do not commit the Parquet feature table, model samples, fitted preprocessor, audit CSVs, experiment manifests or logs.
+
+### Persisted feature-stage layout
+
+```text
+BFT65B_11230945/
+└── experiments/<experiment_id>/
+    ├── acquisition/                         # published source; read-only
+    ├── storage/                             # published storage evidence; read-only
+    ├── quality_panel/                       # published 48-field input panel; read-only
+    ├── processing/                          # published performance evidence; read-only
+    ├── features/
+    │   ├── feature_policy.lock.json
+    │   ├── feature_table/year=YYYY/quarter=Q/part-00000.parquet
+    │   ├── model_data/
+    │   │   ├── development.parquet
+    │   │   ├── test_holdout.parquet
+    │   │   └── development_preprocessor.joblib
+    │   ├── audits/                          # feature, event, split, and fit evidence
+    │   ├── figures/                         # development diagnostics and event history
+    │   ├── part4_manifest.json
+    │   └── part4_validation.json
+    └── run_logs/part4_feature_pipeline.log
+```
+
+**Part 5 input contract.** Development model selection must load the separate `model_data/development.parquet` and use the ordered `FEATURE_NAMES` from `feature_policy.py`. The `test_holdout.parquet` is reserved for evaluation **after** the model and cost-sensitive threshold have been locked. The `features` stage's direct parent is the `quality_panel` validation SHA-256; the processing evidence SHA-256 is checked as a second immutable dependency.
+
+**Reproducibility CLI:**
+
+```bash
+python -m pip install -r requirements_part4.txt
+python -m pytest -q -rs tests
+python run_feature_pipeline.py build \
+  --drive-root /content/drive/MyDrive/BFT65B_11230945 \
+  --code-commit <40-character-git-commit> --replace-incomplete
+python run_feature_pipeline.py verify \
+  --drive-root /content/drive/MyDrive/BFT65B_11230945
+```
+
+**Sources:** FDIC, *BankFind Suite API Documentation* (https://api.fdic.gov/banks/docs/); FDIC, *Failures and Assistance—Transaction Types and Definitions* (https://banks.data.fdic.gov/bankfind-suite/failures/help); scikit-learn, *Pipeline*, *SimpleImputer* and *RobustScaler* documentation (https://scikit-learn.org/stable/); course examination handout; OpenAI ChatGPT (GPT-6) used for code drafting/review support. Claims about pipeline outcomes require executed tests and experiment-specific saved evidence.

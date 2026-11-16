@@ -1,0 +1,5 @@
+# Pinned dependencies for feature engineering and development-only preprocessing.
+-r requirements_part3.txt
+numpy==2.2.6
+scikit-learn==1.7.2
+joblib==1.5.2
