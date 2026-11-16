@@ -418,6 +418,15 @@ No downloaded bank records, experimental measurements, model parameters or futur
 
 ## Part 4 — Feature Pipeline (15 points)
 
+### Source installation and safe recovery
+
+Part 4 consists of `notebooks/05_feature_pipeline_colab.ipynb`, `run_feature_pipeline.py`, `requirements_part4.txt`, `src/fdic_pipeline/feature_policy.py`, `src/fdic_pipeline/feature_pipeline.py`, and two Part 4 tests (`test_feature_policy.py`, `test_feature_pipeline_integration.py`). Replace these files at their existing repository paths as one commit. Preserve all upstream notebooks, their source modules, the experiment registry, and the `acquisition`, `storage`, `quality_panel`, and `processing` stages.
+
+The feature-stage output path is `experiments/<experiment_id>/features/` on Google Drive. An absent or **unpublished** stage can be built or rebuilt through Notebook 05; the CLI explicitly replaces only unpublished `features/` output when requested. Do not manually modify `experiment_manifest.json` to clear a published stage. Once `features` has status `PASSED`, the published feature artifacts and their commit remain immutable. A genuinely new research run requires a separately identified experiment, not deletion of a verified stage.
+
+Notebook 05 Section 2 prints and saves the complete pytest output. No failed, errored, or skipped test is acceptable before processing source data. The integration suite verifies individual derived feature/label values against the physical Parquet columns, excluding Hive partition keys inferred from directory names.
+
+
 ### Purpose and source contract
 
 The feature stage transforms the 48-field, 170-quarter bank-quarter panel into an auditable table of 21 current-/past-report financial features, an explicitly time-bounded four-quarter outcome, and physically separated development and holdout samples. It consumes the published `quality_panel` stage, verifies all input partition SHA-256 fingerprints, requires the published `processing` stage, and records that stage's verification digest as an additional dependency. No aggregate benchmark outputs are used as predictors.
