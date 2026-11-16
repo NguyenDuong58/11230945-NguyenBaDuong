@@ -678,8 +678,11 @@ def verify_feature_stage(out: Path, upstream: Mapping[str, Any], *,
             src_path = Path(upstream["quality_dir"]) / src["file"]
             if sha256(src_path) != src["sha256"]:
                 raise FeatureError("Source panel changed during independent verification")
-            source_rows = pq.read_table(src_path).to_pylist()
-            actual = pq.read_table(output / entry["file"]).to_pylist()
+            # Read physical Parquet fields only. The Dataset-based read_table()
+            # can add Hive partition keys (year, quarter) from parent folders,
+            # which are not part of the feature/label schema being verified.
+            source_rows = pq.ParquetFile(src_path).read().to_pylist()
+            actual = pq.ParquetFile(output / entry["file"]).read().to_pylist()
             if len(source_rows) != len(actual):
                 raise FeatureError("Feature quarter changed row count")
             for original, candidate in zip(source_rows, actual):
@@ -700,7 +703,14 @@ def verify_feature_stage(out: Path, upstream: Mapping[str, Any], *,
                             **expected_features, TARGET_COLUMN: y,
                             "LABEL_STATUS": reason, "SPLIT": split}
                 if candidate != expected:
-                    raise FeatureError(f"Feature/outcome values differ from source for CERT={cert}, REPDTE={q}")
+                    missing = sorted(set(expected) - set(candidate))
+                    unexpected = sorted(set(candidate) - set(expected))
+                    different = [name for name in expected if name in candidate and candidate[name] != expected[name]]
+                    raise FeatureError(
+                        f"Feature/outcome values differ from source for CERT={cert}, REPDTE={q}; "
+                        f"missing_fields={missing}, unexpected_fields={unexpected}, "
+                        f"different_fields={different[:10]}"
+                    )
                 row_counts[(split, reason)] += 1
                 if split in TARGET_SPLITS and y is not None:
                     model_row = next(model_iters[split], None)
