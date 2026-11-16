@@ -1,0 +1,6 @@
+# Reproducible processing dependencies; Part 1/2 versions stay unchanged.
+-r requirements.txt
+pandas==2.2.3
+polars==1.35.2
+pyspark==4.0.1
+psutil==7.0.0

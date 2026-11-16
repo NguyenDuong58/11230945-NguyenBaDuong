@@ -1,6 +1,6 @@
 # A Big-Data Pipeline for Bank Failure Early Warning
 
-**BFT65B — Big Data Analytics in Finance | Parts 1–2: Acquisition, Storage, Data Quality and Panel**  
+**BFT65B — Big Data Analytics in Finance | Parts 1–3: Acquisition, Storage, Data Quality and Scalable Processing**  
 **Repository:** https://github.com/NguyenDuong58/11230945-NguyenBaDuong  
 **Runtime:** Google Colab (Python); persistent artifacts: Google Drive; source and tests: GitHub.
 
@@ -20,15 +20,18 @@ The storage study compares losslessly equivalent uncompressed CSV and Snappy Par
 ├── .gitignore
 ├── README.md
 ├── requirements.txt
+├── requirements_part3.txt
 ├── notebooks/
 │   ├── 01_acquisition_colab.ipynb
 │   ├── 02_storage_colab.ipynb
-│   └── 03_data_quality_panel_colab.ipynb
+│   ├── 03_data_quality_panel_colab.ipynb
+│   └── 04_scalable_processing_colab.ipynb
 ├── run_acquisition.py
 ├── run_storage_benchmark.py
 ├── run_storage_analysis.py
 ├── run_layout_benchmark.py
 ├── run_data_quality.py
+├── run_scalable_processing.py
 ├── src/fdic_pipeline/
 │   ├── __init__.py
 │   ├── acquisition.py
@@ -39,7 +42,9 @@ The storage study compares losslessly equivalent uncompressed CSV and Snappy Par
 │   ├── layout_benchmark.py
 │   ├── part1_handoff.py
 │   ├── data_quality.py
-│   └── panel.py
+│   ├── panel.py
+│   ├── processing_engines.py
+│   └── scalable_processing.py
 └── tests/
     ├── conftest.py
     ├── test_acquisition.py
@@ -52,7 +57,10 @@ The storage study compares losslessly equivalent uncompressed CSV and Snappy Par
     ├── test_project_flow.py
     ├── test_workflow.py
     ├── test_data_quality.py
-    └── test_panel_integration.py
+    ├── test_panel_integration.py
+    ├── test_processing_engines.py
+    ├── test_processing_evidence.py
+    └── test_processing_integration.py
 ```
 
 Only source code, notebooks, tests and documentation are committed. **Do not commit** FDIC datasets, Parquet/CSV files, run manifests, experiment results, model files, logs or access tokens. Notebook outputs should be saved back to GitHub **after a successful run**; they should contain compact validation summaries, tables and charts rather than raw data or local authentication information.
@@ -284,13 +292,118 @@ The validator checks source Parquet files and audit fingerprints, typed panel fi
 
 **Part 3 handoff:** `resolve_stage(DRIVE_ROOT, "quality_panel")` identifies the verified Parquet root at `quality_panel/panel/`. Part 3 must verify `part2_validation.json` and `part2_manifest.json` before any benchmark. Future event and institution-status audits remain outside the predictor dataset.
 
+## Part 3 — Scalable Processing (25 points)
+
+### Research objective and experimental scope
+
+The study compares efficient native Polars LazyFrame expressions with an eager pandas baseline and equivalent PySpark SQL transformations on the **same verified Part 2 panel**. The benchmark assesses numerical equivalence, output integrity, runtime, process-tree memory consumption, the behaviour of the optimized plans and input-scale sensitivity. Results pertain to a single Google Colab VM, not a multi-node cluster.
+
+The Part 3 data source is obtained with `resolve_stage(DRIVE_ROOT, "quality_panel")` and must satisfy the acquisition and storage source contracts. The processing stage has `quality_panel` as its registry parent and additionally records the storage validation SHA-256. Its independent code Git commit is recorded in `part3_manifest.json`; no Part 1/2 commit or data file is overwritten.
+
+### Dependencies
+
+`requirements_part3.txt` includes the pinned `requirements.txt` from Parts 1–2 and installs these exact additional packages:
+
+- `pandas==2.2.3` — eager baseline;
+- `polars==1.35.2` — lazy, optimized scan and transformations;
+- `pyspark==4.0.1` — equivalent transformations with `SparkSession` using `local[2]`;
+- `psutil==7.0.0` — sampled process-tree RSS (Python and Spark JVM).
+
+PySpark requires **Java 17 or later**. Python packages satisfying the pinned versions are not forcibly reinstalled. The notebook verifies Java, installed package versions, and every repository unit/integration test with no failures, errors or skips. A fresh Colab CPU runtime is preferred to avoid memory contention and stale Spark sessions.
+
+### Input corpus and three transformation workloads
+
+The complete Part 2 panel contains 48 typed fields and 170 quarter-partitioned Parquet files. All files are copied to `/content` with source and destination SHA-256 verification before measurement. The most recent 85-quarter subset is created by hard-linking the corresponding local files where possible. There is no synthetic replication, imputation, or use of future event data. The exact row counts for each scale are recorded from the selected Part 2 manifest.
+
+| Workload | Input columns and transformation | Output key / correctness considerations |
+|---|---|---|
+| `quarter_aggregation` | Filter REPDTE >= 2000-03-31; aggregate bank-quarter count, assets, deposits, mean ROA, and extreme ROE flags | REPDTE; null ROA ignored in mean; numeric sums over null deposits treated as zero |
+| `adjacent_asset_growth` | Sort by CERT and REPDTE; lag assets within CERT; calculate asset growth only when reports are exactly one quarter apart; aggregate pairs and mean growth | REPDTE; a missing intermediate report is **not** one-quarter growth |
+| `state_year_risk` | Group by calendar year and STNAME; sum assets/loans and diagnostic flags, mean ROA, count reports with missing financial measurements | YEAR, STNAME; null/blank state becomes `MISSING`; the source flags are non-mutating current-report diagnostics |
+
+Each workload uses the same selected source fields across pandas, Polars and Spark. Polars starts from `scan_parquet(...)`, and optimized plans are saved. Spark uses DataFrame SQL transformations and window functions rather than Python UDFs, with a two-thread local master and eight shuffle partitions. Dates, counts, nulls and every floating aggregate are compared across engines (`rel_tol=1e-10`, `abs_tol=1e-5`). Entire grouped output tables are saved for every benchmark trial so the audit can recompute all comparisons independently.
+
+The scales are **recent_85** (the latest 85 available reporting quarters) and **full_170** (all 170 quarters). They contain different historical bank populations and must not be interpreted as a controlled doubling of identical observations. The empirical size ratio and measured runtime ratios are reported together.
+
+### Measurement protocol
+
+Each of three workloads × three engines × two scales receives **one warmup and five measured repetitions**. This yields **18 warmup trials, 90 measured trials and 72 full-output numerical comparisons** (each of six rounds × three workloads × two scales compares pandas–Polars and pandas–Spark). A fixed seed `11230945` randomizes the ordering of all 18 tasks inside each round. Each task runs in a fresh Python worker; Spark initialization occurs before the timer, while the Parquet scan, transformation and materialization occur within it.
+
+A 50 ms sampler estimates peak total RSS for the Python worker and its recursive children, including Spark's JVM. This is a sampled process-tree measure, not a precise maximum JVM heap measurement, and is not directly comparable with Part 1's single-process `ru_maxrss` metrics. Operating-system cache can persist between subprocesses even though engine objects are not reused.
+
+The program saves six Polars/Spark optimized-plan text files (three each), a plan-inspection table, grouped reference outputs, raw trial measurements, full trial result tables, independent summary checks and three performance charts. It does not infer pushdown or shuffle benefits solely from wall-clock results: the plans must be inspected before discussing their physical execution.
+
+### Running Notebook 04 in Google Colab
+
+1. Upload all files supplied for Part 3 into the existing GitHub repository, preserving their relative paths and **replacing** the root `README.md`. All earlier `.ipynb`, Python modules and source data remain unchanged. Save the changes in one commit.
+2. Open [Notebook 04](https://colab.research.google.com/github/NguyenDuong58/11230945-NguyenBaDuong/blob/main/notebooks/04_scalable_processing_colab.ipynb) with a fresh Python 3 CPU runtime, then execute the cells in order. The code mounts Drive at `/content/drive` and chooses the **explicit** active experiment; do not manually select a run directory.
+3. Section 1 checks out the correct source commit and installs `requirements_part3.txt`. Section 2 asserts Java >=17, checks package versions and runs the **full test suite**. Stop if any test is skipped or fails.
+4. Section 3 verifies the published `acquisition`, `storage` and `quality_panel` stages and SHA-256 checks the 170 input files. Section 4 prints the fixed workload definitions and trial counts.
+5. Section 5 copies the verified source to local disk and measures all three engines in isolated worker processes. The benchmark is invalid unless all 72 cross-engine comparisons pass and all 90 measured trials are recorded. Source SHA checks and per-engine plans are saved in the processing stage.
+6. Sections 6–8 display medians, speedups, scaling results, execution-plan indicators and charts. The independent validator in Section 9 rechecks hashes, medians, full numerical output comparisons and source lineage.
+7. Confirm **`Part 3: PASSED`** and **`Handoff state: PASSED`** in the notebook's last two sections. Save the executed notebook with compact outputs on GitHub, but not raw FDIC Parquet, timing CSVs, saved plans, logs or JSON manifests.
+
+**Expected final gate:** 170 verified source quarterly files; three equivalent workloads × three engines × two scales; 90 measured trials; 18 warmups; 72 full numerical comparisons; six execution plans; intact input and output SHA-256; a `PASSED` processing-stage validation and verified `quality_panel` parent lineage. Exact performance results are measured on Colab and must not be inferred from other experiments.
+
+**Colab disk requirement:** Section 5 checks for at least 3 GiB free local `/content` space. All computation is performed locally; only verified artifacts are persisted on Drive. If a run stops before `processing` is published, rerun Notebook 04 to rebuild that unpublished stage. After publication, the notebook performs verification without replacing evidence.
+
+### Processing-stage output and downstream contract
+
+```text
+BFT65B_11230945/
+└── experiments/<experiment_id>/
+    ├── acquisition/                    # verified Part 1 source; read-only
+    ├── storage/                        # verified Part 1 benchmark; read-only
+    ├── quality_panel/panel/            # verified Part 2 inputs; read-only
+    ├── processing/
+    │   ├── input_snapshot.json
+    │   ├── environment.json
+    │   ├── trials.csv
+    │   ├── trial_results.jsonl
+    │   ├── equivalence.csv
+    │   ├── performance_summary.csv
+    │   ├── scaling_summary.csv
+    │   ├── plan_inspection.csv
+    │   ├── plans/                      # 6 complete Polars and Spark plans
+    │   ├── results/                    # 6 grouped pandas reference tables
+    │   ├── figures/                    # runtime, scaling and process RSS
+    │   ├── plan_discussion.md
+    │   ├── part3_manifest.json
+    │   └── part3_validation.json
+    └── run_logs/part3_scalable_processing.log
+```
+
+Part 4 will obtain the bank-quarter dataset through `resolve_stage(root, "quality_panel")`, not from the aggregated Part 3 benchmark results. The Part 3 stage is available separately for performance evidence, and its quality-panel parent SHA-256 must match the selected experiment. The source data and retrospective event audits remain separate from modelling features.
+
+**Operational interpretation.** A multi-node Spark cluster is not justified merely because Spark is part of the course. Before proposing a cluster, inspect actual query plans, memory pressure and runtimes on realistic workloads. Distribution becomes relevant when the working set cannot be processed reliably within a single host's memory/disk limits, when multi-source joins/shuffles overwhelm the local executor, or when operational throughput and latency requirements are repeatedly missed. The current `local[2]` results cannot establish any empirical cluster speedup. The conclusions should also consider coordination, I/O and operational cost.
+
+### Command-line verification
+
+```bash
+python -m pip install -r requirements_part3.txt
+python -m pytest -q -rs tests
+
+# The 40-character Part 3 source commit is the one returned by git rev-parse HEAD.
+python run_scalable_processing.py build \
+  --drive-root /content/drive/MyDrive/BFT65B_11230945 \
+  --code-commit <40-character-git-commit> \
+  --scratch /content/bft65b_part3_scratch \
+  --repetitions 5 --warmups 1 --replace-incomplete
+
+# Independent source and evidence verification without new measurements.
+python run_scalable_processing.py verify \
+  --drive-root /content/drive/MyDrive/BFT65B_11230945
+```
+
 ## Academic sources and disclosure
 
 1. FDIC, *BankFind Suite API Documentation*, https://api.fdic.gov/banks/docs/ (accessed 16 November 2026).
 2. FDIC, *Financial, Failure, and Institution API field definitions*, YAML dictionary links above (accessed 16 November 2026).
 3. Apache Arrow, *PyArrow Dataset and Parquet documentation*, https://arrow.apache.org/docs/python/dataset.html .
-4. Google, *Colaboratory FAQ*, https://research.google.com/colaboratory/faq.html .
-5. BFT65B, *Final Individual Report — A Big-Data Pipeline for Bank Failure Early Warning*, examination handout.
-6. OpenAI ChatGPT (GPT-6), code drafting and review support, 16 November 2026. The analysis must be verified by executable tests and independently measured FDIC results; generated suggestions are not treated as evidence.
+4. Apache Software Foundation, *PySpark 4.0.1 Installation and SQL Reference*, https://spark.apache.org/docs/4.0.1/api/python/getting_started/install.html .
+5. Polars, *LazyFrame and Query Optimization documentation*, https://docs.pola.rs/api/python/stable/reference/lazyframe/ .
+6. Google, *Colaboratory FAQ*, https://research.google.com/colaboratory/faq.html .
+7. BFT65B, *Final Individual Report — A Big-Data Pipeline for Bank Failure Early Warning*, examination handout.
+8. OpenAI ChatGPT (GPT-6), code drafting and review support, 16 November 2026. The analysis must be verified by executable tests and independently measured FDIC results; generated suggestions are not treated as evidence.
 
-No downloaded bank records, experimental measurements, model parameters or future-outcome labels are supplied in the GitHub source repository. Part 2 audit outcomes are stored separately from prediction features and are not committed to GitHub.
+No downloaded bank records, experimental measurements, model parameters or future-outcome labels are supplied in the GitHub source repository. Part 2 audit outcomes are stored separately from prediction features. Part 3 benchmark results and execution-plan evidence are stored on Google Drive and referred to by SHA-256; only notebook summaries are committed. This research report must cite the applicable source APIs, engine documentation and AI assistance disclosed here.
