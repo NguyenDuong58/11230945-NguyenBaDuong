@@ -4,6 +4,7 @@ No FDIC records are generated or modified; synthetic schemas reproduce the
 published 48-column panel contract and the source resolution categories.
 """
 from datetime import date, timedelta
+import csv
 import json
 from pathlib import Path
 
@@ -12,7 +13,7 @@ import pytest
 pa = pytest.importorskip("pyarrow")
 pq = pytest.importorskip("pyarrow.parquet")
 
-from fdic_pipeline.acquisition import sha256
+from fdic_pipeline.acquisition import arrow_schema, sha256, table_path
 from fdic_pipeline.panel import panel_schema
 from fdic_pipeline.data_quality import QUALITY_RULES
 from fdic_pipeline.feature_pipeline import (
@@ -65,13 +66,33 @@ def _test_input(tmp_path: Path):
         {"CERT":5,"RESTYPE":"UNKNOWN","FAILDATE":"2008-12-01"},
         {"CERT":None,"RESTYPE":"FAILURE","FAILDATE":"2008-11-02"},
     ]
+    # Write the complete synthetic evidence needed by the independent verifier.
+    # Verification reconstructs event ledgers from these files rather than trusting
+    # the in-memory objects used during construction.
+    acquisition_dir = tmp_path / "acquisition"
+    acquisition_dir.mkdir()
+    failures_file = table_path(acquisition_dir, "failures")
+    pq.write_table(pa.Table.from_pylist(failures, schema=arrow_schema("failures")),
+                   failures_file, compression="snappy")
+    audit_dir = panel_root / "audits"
+    audit_dir.mkdir()
+    terminal_file = audit_dir / "terminal_exits.csv"
+    terminal_columns = ("CERT", "LAST_REPDTE", "INSTITUTION_END_DATE")
+    with terminal_file.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=terminal_columns)
+        writer.writeheader()
+        writer.writerows(terminals)
+
     ledgers,audit=event_ledgers(failures,terminals)
     snap={"experiment_id":"experiment_20261116T115513Z_d23d2b10",
           "panel_rows":sum(i["rows"] for i in contents),
           "partitions":contents,"quality_dir":str(panel_root),
           "part2_manifest_sha256":"a"*64,"quality_verification_sha256":"b"*64,
           "processing_verification_sha256":"c"*64,
-          "failures_sha256":"d"*64,"terminal_audit_sha256":"e"*64,
+          "failures_sha256":sha256(failures_file),
+          "terminal_audit_sha256":sha256(terminal_file),
+          "acquisition_path":str(acquisition_dir),
+          "quality_path":str(panel_root),
           "feature_code_commit":"f"*40}
     return panel_root,contents,ledgers,audit,snap
 
